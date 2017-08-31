@@ -1,8 +1,10 @@
 #TODO spread out functions into different files
 from __future__ import print_function
 import httplib2
-import os
+import os, sys, pprint
 import re, string
+import time
+
 
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
@@ -16,6 +18,7 @@ from datetime import timedelta
 
 from apiclient import discovery
 from oauth2client import client as Oclient
+from googleapiclient import sample_tools
 from oauth2client import tools
 from oauth2client.file import Storage
 
@@ -32,7 +35,8 @@ except ImportError:
 SCOPES = 'https://www.googleapis.com/auth/spreadsheets'
 CLIENT_SECRET_FILE = 'client_secret.json'
 APPLICATION_NAME = 'RelayBot'
-TRUSTED_IDS = ['278708481995833354','279810303170969620','271379542688399362','278723003146174465','233963211588632576','260836495236005888','232074884086366208']
+TRUSTED_IDS = ['278708481995833354','279810303170969620','271379542688399362','278723003146174465','233963211588632576','260836495236005888','232074884086366208','260539188846395394','135588507480489984']
+DEFAULT_CHANNELS = ['278657594292305920','344579852784893972','328185522013077507','281665427447480321','333073215360598016']
 
 client = discord.Client()
 update_index = 0
@@ -42,13 +46,16 @@ SHEET_ENUM = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', '
 service = None
 
 gym_channels_ = []
+sector_display = []
 linking_ = False
 
-gyms = {}
 commands = {}
-region_display = []
-regions = {}
+
+gyms = {}
+sectors = {}
 descriptions = {}
+
+threshhold = 130
 
 #basic async url fetch used for fetching discord message attachments
 async def fetch(session, url):
@@ -88,30 +95,57 @@ async def find_gym(message):
             ration = fuzz.token_sort_ratio(sub, key)
             ration += fuzz.token_set_ratio(sub, key)
 
-            if ration > 135 and key not in printed:
+            if ration > threshhold and key not in printed:
                 print("%s: %s" % ("".join([s for s in key if s in string.printable]),ration))
-                await client.send_message(message.channel, "%s: %s" % (key, gyms[key]['link']))
+                await client.send_message(message.channel, "%s: <%s>" % (key, gyms[key]['link']))
                 printed.append(key)
             elif ration > 100:
                 print("%s: %s" % ("".join([s for s in key if s in string.printable]),ration))
                 
 async def find_sector(message):
     args = message.content.split()
-    
-    if len(args) > 3:
+    block = []
+    if len(args) > 4 or len(args) == 1 or (len(args) == 2 and args[1] == 'here'):
         return #error
-    elif len(args) == 3:
-        reg = ("%s%s"%(args[1],args[2])).capitalize()
+        
+    if args[1] == 'here':
+        target = message.channel
+        mess = ''
+        if len(args) == 4:
+            reg = ("%s%s"%(args[2],args[3])).capitalize()
+        else:
+            reg = args[2].capitalize()
     else:
-        reg = args[1].capitalize()
-    if reg in regions:
-        sect = regions[reg][0]
-        await client.send_message(message.channel, "Sector %s: %s\n" % (sect['region'], descriptions[sect['region']]))
-        for gym in regions[reg]:
-            await client.send_message(message.channel, "%s: %s" % (gym['gym'], gym['link']))
+        target = message.author
+        if len(args) == 3:
+            reg = ("%s%s"%(args[1],args[2])).capitalize()
+        else:
+            reg = args[1].capitalize()
+            
+    if reg in sectors:
+        sect = sectors[reg][0]
+        embed=discord.Embed(title='')
+        if target == message.author:
+            await client.send_message(message.channel, 'DM sent to <@!%s> with Sector %s: %s info'%(message.author.id,sect['sector'],descriptions[sect['sector']]))
+        for gym in sectors[reg]:
+            block.append("%s: [%s](%s)\n"%(gym['number'],gym['gym'],gym['link']))
+        print(len(''.join(block)))
+        print(''.join(block))
+        embed.add_field(name="Sector %s: %s\n" % (sect['sector'], descriptions[sect['sector']]), value=''.join(block), inline=False)
+        await client.send_message(target, '', embed=embed)
     else:
         return #error
     
+async def set_threshhold(message):
+    global threshhold
+    args = message.content.split()
+    
+    if len(args) > 2:
+        return #error
+    elif len(args) == 1:
+        threshhold = 130
+    else:
+        threshhold = int(args[1])
            
 #handles messages
 @client.event
@@ -221,14 +255,14 @@ async def status_check(message):
     else:
         await client.send_message(message.channel, 'Relay is not active.')
         
-async def toggle_region_display(message):
-    global region_display
-    if message.channel.id in region_display:
-        region_display.remove(message.channel.id)
-        await client.send_message(message.channel, 'Hiding gym regional info.')
+async def toggle_sector_display(message):
+    global sector_display
+    if message.channel.id in sector_display:
+        sector_display.remove(message.channel.id)
+        await client.send_message(message.channel, 'Hiding gym sectoral info.')
     else:
-        region_display.append(message.channel.id)
-        await client.send_message(message.channel, 'Displaying gym regional info.')
+        sector_display.append(message.channel.id)
+        await client.send_message(message.channel, 'Displaying gym sectoral info.')
 
 #right now it is not really custom
 async def custom_message(message):
@@ -258,13 +292,22 @@ async def initialize_channel(message):
         await client.send_message(message.channel, 'Initialized to channel %s.' % (message.channel.id))
     else:
         await client.send_message(message.channel, 'Channel purpose must be "gym"')
+        
+async def update(message):
+    global gyms, sectors, descriptions
+    
+    gyms = {}
+    sectors = {}
+    descriptions = {}
+    
+    update_lists()
 
 #updates local data lists from the reference sheet
 def update_lists():
-    global service, gyms, regions
+    global service, gyms, sectors
 
     spreadsheetId = '1n88ieu34cejbSpiQOlK71B_8tpGjAAIzvw7Le3E7N8U'
-    rangeName = "'Links'!A2:E"
+    rangeName = "'Links'!A2:F"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheetId, range=rangeName).execute()
     values = result.get('values', [])
@@ -276,25 +319,37 @@ def update_lists():
         for row in values:
             # generate user lookup index so don't have to query all the time
             #print('%s, %s' % (row[0], row[1]))
-            if len(row) < 5:
+            if len(row) < 6:
                 link = 'unknown'
-                if len(row) < 4:
+                if len(row) < 5:
                     desc = 'unknown'
+                    if len(row) < 3:
+                        num = 'unknown'
+                        reg = 'unknown'
+                    else:
+                        num = row[3]
+                        reg = row[2]
+                else:
+                    desc = row[4]
+                    num = row[3]
+                    reg = row[2]
             else:
-                desc = row[3]
-                link = row[4]
-            gyms[row[0]] = { 'gym' : row[0], 'link' : link, 'region' : row[1], 'number' : row[2], 'description' : desc }
+                desc = row[4]
+                link = row[5]
+                num = row[3]
+                reg = row[2]
+            gyms[row[0]] = { 'gym' : row[0], 'link' : link, 'sector' : reg, 'number' : num, 'description' : desc }
             
-            if row[1] not in regions.keys():
-                regions[row[1]] = [ { 'gym' : row[0], 'link' : link, 'region' : row[1], 'number' : row[2], 'description' : desc } ]
+            if reg not in sectors.keys():
+                sectors[reg] = [ { 'gym' : row[0], 'link' : link, 'sector' : reg, 'number' : num, 'description' : desc } ]
             else:
-                regions[row[1]].append( { 'gym' : row[0], 'link' : link, 'region' : row[1], 'number' : row[2], 'description' : desc } )
-            if ("%s%s"%(row[1],row[2])) not in regions.keys():
-                regions[("%s%s"%(row[1],row[2]))] = [ { 'gym' : row[0], 'link' : link, 'region' : row[1], 'number' : row[2], 'description' : desc } ]
+                sectors[reg].append( { 'gym' : row[0], 'link' : link, 'sector' : reg, 'number' : num, 'description' : desc } )
+            if ("%s%s"%(reg,num)) not in sectors.keys():
+                sectors[("%s%s"%(reg,num))] = [ { 'gym' : row[0], 'link' : link, 'sector' : reg, 'number' : num, 'description' : desc } ]
             else:
-                regions[("%s%s"%(row[1],row[2]))].append( { 'gym' : row[0], 'link' : link, 'region' : row[1], 'number' : row[2], 'description' : desc } )
+                sectors[("%s%s"%(reg,num))].append( { 'gym' : row[0], 'link' : link, 'sector' : reg, 'number' : num, 'description' : desc } )
     
-    rangeName = "'Links'!L2:M"
+    rangeName = "'Links'!M2:N"
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheetId, range=rangeName).execute()
     values = result.get('values', [])
@@ -306,15 +361,17 @@ def update_lists():
             descriptions[row[0]] = row[1]
 
 
-def main():
-    global commands, client
+def main(argv):
+    global commands, client, gym_channels_
     commands = {';startlinking' : start_linking,
                  ';stoplinking' : stop_linking,
                  ';status' : status_check,
                  ';help' : print_help,
                  ';gym' : find_gym,
                  ';sector' : find_sector,
-                 ';;;region;;;' : toggle_region_display,
+                 ';;;threshhold;;;' : set_threshhold,
+                 ';;;update;;;' : update,
+                 ';;;sector;;;' : toggle_sector_display,
                  ';;;init;;;' : initialize_channel }
     
     credentials = get_credentials()
@@ -325,11 +382,14 @@ def main():
     service = discovery.build('sheets', 'v4', http=http,
                               discoveryServiceUrl=discoveryUrl)
     update_lists()
+    gym_channels_.extend(DEFAULT_CHANNELS)      
             
+            
+    
     client.run('MzA1MjE0NTAyNzE3MzU4MDkx.DEH9Ew.RoHYn4kRyPKKb77ZqwjZOkd4_xQ')
     
     #gather_update()
     print("okay done now")
     
 if __name__ == '__main__':
-    main()
+    main(sys.argv)

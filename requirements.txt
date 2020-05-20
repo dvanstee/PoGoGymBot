@@ -8,7 +8,7 @@ discord.py==0.16.6
 future==0.16.0
 fuzzywuzzy==0.15.0
 google-api-python-client==1.6.2
-httplib2==0.10.3
+httplib2==0.18.0
 multidict==2.1.4
 numpy==1.12.1
 oauth2client==4.0.0
